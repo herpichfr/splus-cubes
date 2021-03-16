@@ -8,6 +8,7 @@
 from __future__ import print_function, division
 
 import os
+import glob
 import itertools
 import warnings
 #from getpass import getpass
@@ -48,7 +49,7 @@ class scubes(object):
         #               ['02:46:33.916', '-00:14:49.35']]
         self.names = np.array(['NGC1087'])
         self.coords = [['02:46:25.15', '-00:29:55.45']]
-        self.sizes = np.array([10])
+        self.sizes = np.array([100])
         self.outdir = './'
         self.tiles_dir = './'
         self.foot_dir = '/home/herpich/Documents/pos-doc/t80s/Dropbox/myScripts/'
@@ -177,8 +178,6 @@ class scubes(object):
             fcoords = SkyCoord(ra=field['RA'], dec=field['DEC'],
                                unit=(u.hour, u.deg)) #self.coords[idx]
             fsizes = np.array(sizes)[fields['NAME'] == fnames]
-            #print(fnames, fsizes)
-            #return
             stamps = dict((k, []) for k in img_types)
             for img_type in tqdm(img_types, desc="Data types", leave=False,
                                 position=1):
@@ -236,7 +235,7 @@ class scubes(object):
                             hdulist.writeto(output, overwrite=True)
                         else:
                             print('To be implemented')
-                            stamps[img_type].append(hdulist)
+                            #stamps[img_type].append(hdulist)
         #if savestamps:
         #    return
         #else:
@@ -295,6 +294,14 @@ class scubes(object):
             zp += round(zpcorr[filtername](x0, y0)[0][0], 5)
             fits.setval(filename, "MAGZP", value=zp,
                         comment="Magnitude zero point", ext=1)
+
+    def calc_masks(self):
+        """ Calculate masks for S-PLUS images from the weight maps """
+        indir = os.path.join(self.outdir, self.names[0])# if outdir is None else outdir
+        outdir = os.path.join(self.outdir, self.names[0])# if outdir is None else outdir
+        wmaps = glob.glob(indir + '*_swpweight.fits')
+        for wmap in wmaps:
+            w = fits.open(wmap)
 
     def make_cubes(self, indir=None, outdir=None, redo=False, bands=None,
                    specz="", photz="", bscale=1e-19):
