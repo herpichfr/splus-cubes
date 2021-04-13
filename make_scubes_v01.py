@@ -48,6 +48,7 @@ class scubes(object):
         #self.coords = [['02:46:25.15', '-00:29:55.45'],
         #               ['02:46:33.916', '-00:14:49.35']]
         self.names = np.array(['NGC1087'])
+        self.fields = None
         self.coords = [['02:46:25.15', '-00:29:55.45']]
         self.sizes = np.array([100])
         self.outdir = './'
@@ -241,6 +242,63 @@ class scubes(object):
         #else:
         #    return stamps
 
+    def make_det_stamp(self):
+        names = np.atleast_1d(self.names)
+        sizes = np.atleast_1d(self.sizes)
+        if len(sizes) == 1:
+            sizes = np.full(len(names), sizes[0])
+        sizes = sizes.astype(np.int)
+        outdir = os.getcwd() if self.outdir is None else self.outdir
+        if not os.path.isdir(outdir):
+            os.mkdir(outdir)
+        tiles_dir = "/storage/share/all_coadded" if self.tiles_dir is None else self.tiles_dir
+        header_keys = ["OBJECT", "FILTER", "EXPTIME", "GAIN", "TELESCOP",
+                    "INSTRUME", "AIRMASS"]
+
+        # Selecting tiles from S-PLUS footprint
+        #fields = self.check_infoot() if self.fields is None else self.fields
+        fields = self.check_infoot()
+
+        # Producing stamps
+        for field in fields:
+            field_name = field["TILE"]
+            fnames = [field['NAME']]
+            fcoords = SkyCoord(ra=field['RA'], dec=field['DEC'],
+                               unit=(u.hour, u.deg)) #self.coords[idx]
+            fsizes = np.array(sizes)[fields['NAME'] == fnames]
+            for i, (name, size) in enumerate(zip(fnames, fsizes)):
+                galdir = os.path.join(outdir, name)
+                if not os.path.isdir(galdir):
+                    os.makedirs(galdir)
+                doutput = os.path.join(galdir,
+                                       "{0}_{1}_{2}x{2}_{3}.fits".format(
+                                       name, field_name, size, 'det_scimas'))
+                if not os.path.isfile(doutput):
+                    try:
+                        d = fits.open(tiles_dir + field_name + '_det_scimas.fits')[0]
+                    except:
+                        d = fits.open(tiles_dir + field_name + '_det_scimas.fits.fz')[1]
+                    dheader = d.header
+                    ddata = d.data
+                    wcs = WCS(dheader)
+                    xys = wcs.all_world2pix(fcoords.ra, fcoords.dec, 1)
+                    dcutout = Cutout2D(ddata, position=fcoords,
+                                       size=size * u.pixel, wcs=wcs)
+                    hdu = fits.ImageHDU(dcutout.data)
+                    for key in header_keys:
+                        if key in dheader:
+                            hdu.header[key] = dheader[key]
+                    hdu.header["TILE"] = hdu.header["OBJECT"]
+                    hdu.header["OBJECT"] = name
+                    if "HIERARCH OAJ PRO FWHMMEAN" in dheader:
+                        hdu.header["PSFFWHM"] = dheader["HIERARCH OAJ PRO FWHMMEAN"]
+                    hdu.header["X0TILE"] = (xys[0].item(), "Location in tile")
+                    hdu.header["Y0TILE"] = (xys[1].item(), "Location in tile")
+                    hdu.header.update(dcutout.wcs.to_header())
+                    hdulist = fits.HDUList([fits.PrimaryHDU(), hdu])
+                    print('saving', doutput)
+                    hdulist.writeto(doutput, overwrite=True)
+
     def get_zps(self, tile):
         """ Load all tables with zero points for iDR3. """
         _dir = self.data_dir
@@ -303,17 +361,23 @@ class scubes(object):
         for wmap in wmaps:
             w = fits.open(wmap)
 
-    def make_cubes(self, indir=None, outdir=None, redo=False, bands=None,
-                   specz="", photz="", bscale=1e-19):
+    def make_cubes(self, indir=None, outdir=None, redo=False, dodet=False,
+                   bands=None, specz="", photz="", bscale=1e-19):
         """ Get results from cutouts and join them in a cube. """
 
         indir = os.path.join(self.outdir, self.names[0]) if outdir is None else outdir
+        if not os.path.isdir(indir):
+            os.mkdir(indir)
         outdir = os.path.join(self.outdir, self.names[0]) if outdir is None else outdir
-        filenames = os.listdir(indir)
+        if not os.path.isdir(outdir):
+            os.mkdir(outdir)
+        filenames = glob.glob(indir + '/*_swp*.fits')
         galaxy = self.names[0]
-        if len(filenames) < 24 or redo is True:
+        if redo:
             self.make_stamps_splus(redo=True)
-            filenames = os.listdir(indir)
+            filenames = glob.glob(indir + '/*_swp*.fits')
+        if dodet:
+            self.make_det_stamp()
         fields = set([_.split("_")[-4] for _ in filenames])
         sizes = set([_.split("_")[-2] for _ in filenames])
         bands = self.bands if bands is None else bands
@@ -326,7 +390,7 @@ class scubes(object):
             cubename = os.path.join(outdir, "{}_{}_{}.fits".format(galaxy, field,
                                                                 size))
             if os.path.exists(cubename) and not redo:
-                print('cube exists?')
+                print('cube exists!')
                 continue
             # Loading and checking images
             imgs = [os.path.join(indir, "{}_{}_{}_{}_swp.fits".format(galaxy,
@@ -420,5 +484,12 @@ if __name__ == "__main__":
     #out = scubes.get_zps()
     #out = scubes.get_zp_correction()
     #out = scubes.calibrate_stamps()
-    scubes.sizes = np.array([600]) # max(A, B) * 100
-    out = scubes.make_cubes(redo=False, specz=0.005070)
+    scubes.names = np.array(['NGC1399'])
+    scubes.coords = [['03:38:29.083', '-35:27:02.67']]
+    scubes.foot_dir = '/home/luna/Documentos/usp/ic/fabio/aladin/'
+    scubes.zpcorr_dir = '/home/luna/Documentos/usp/ic/fabio/splus-cubes/data/zpcorr_idr3/'
+    scubes.sizes = np.array([2844]) # max(A, B) * 100
+    #out = scubes.make_cubes(redo=False, specz=0.004755)
+    scubes.tiles_dir = './'
+    scubes.fields = ['SPLUS-s27a34']
+    scubes.make_det_stamp()
