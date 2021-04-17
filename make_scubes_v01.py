@@ -27,6 +27,7 @@ from astropy.wcs.utils import pixel_to_skycoord as pix2sky
 from astropy.wcs.utils import skycoord_to_pixel as sky2pix
 import pandas as pd
 from scipy.interpolate import RectBivariateSpline
+from astropy.visualization import make_lupton_rgb
 from tqdm import tqdm
 import sewpy
 import matplotlib.pyplot as plt
@@ -67,7 +68,6 @@ class SCubes(object):
         # self.gal_dir = os.path.join(self.work_dir, self.galaxies[0])
         self.data_dir = '/home/herpich/Documents/pos-doc/t80s/scubes/data/'
         self.zpcorr_dir = '/home/herpich/Documents/pos-doc/t80s/scubes/data/zpcorr_idr3/'
-        self.galindexes = [1]
 
         # from Kadu's context
         self.ps = 0.55 * u.arcsec / u.pixel
@@ -457,13 +457,42 @@ class SCubes(object):
         mean, median, std = sigma_clipped_stats(fdata, sigma=3.0)
         print(('mean', 'median', 'std'))
         print((mean, median, std))
-        daofind = DAOStarFinder(fwhm=3.0, sharplo=0.5, sharphi=0.9,
-                                roundlo=-0.25, roundhi=0.25, threshold=5. * std)
+        daofind = DAOStarFinder(fwhm=4.0, sharplo=0.2, sharphi=0.9,
+                                roundlo=-1, roundhi=1, threshold=5. * std)
         sources = daofind(fdata)
         return sources
 
-    def calc_masks(self, galaxy: str=None, tile: str=None, size: int=None,
-                   savemask: bool=False, savefig: bool=False):
+    def make_Lupton_colorstamp(self, galaxy: str=None, tile: str=None, size: int=None):
+        """Make Lupton colour image from stamps"""
+
+        outdir = os.getcwd() if self.work_dir is None else self.work_dir
+        galaxy = self.galaxies[0] if galaxy is None else galaxy
+        tile = self.tiles[0] if tile is None else tile
+        size = self.sizes[0] if size is None else size
+        galdir = os.path.join(outdir, galaxy)
+        bands = self.bands
+        blues = ['U', 'F378', 'F395', 'F410', 'F515']
+        greens = ['G', 'R', 'F660']
+        reds = ['I', 'F861', 'Z']
+
+        bimgs = [os.path.join(galdir, "{0}_{1}_{2}_{3}x{3}_swp.fits".format(
+            galaxy, tile, band, size)) for band in blues]
+        bdata = sum([fits.getdata(img) for img in bimgs])
+        gimgs = [os.path.join(galdir, "{0}_{1}_{2}_{3}x{3}_swp.fits".format(
+            galaxy, tile, band, size)) for band in greens]
+        gdata = sum([fits.getdata(img) for img in gimgs])
+        rimgs = [os.path.join(galdir, "{0}_{1}_{2}_{3}x{3}_swp.fits".format(
+            galaxy, tile, band, size)) for band in reds]
+        rdata = sum([fits.getdata(img) for img in rimgs])
+        gal = os.path.join(galdir, galaxy + '.png')
+        #rgb = make_lupton_rgb(rdata, gdata, bdata, Q=10, stretch=0.5, filename=gal)
+        rgb = make_lupton_rgb(rdata, gdata, bdata, filename=gal)
+        ax = plt.imshow(rgb, origin='lower')
+
+        return rgb
+
+    def calc_masks(self, galaxy: str=None, tile: str=None, size: int=None, savemask: bool=False,
+                   savefig: bool=False, galindexes: list=[], maskstar: list=[]):
         """
         Calculate masks for S-PLUS stamps. Masks will use the catalogue of stars and from the
         SExtractor segmentation image. Segmentation regions need to be manually selected
@@ -472,13 +501,14 @@ class SCubes(object):
         galaxy = self.galaxies[0] if galaxy is None else galaxy
         tile = self.tiles[0] if tile is None else tile
         size = self.sizes[0] if size is None else size
-        galdir = os.path.join(outdir, galaxy)  # if self.gal_dir is None else self.gal_dir
+        galdir = os.path.join(outdir, galaxy)
         pathdetect: str = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.fits".format(
             galaxy, tile, size, 'det_scimas'))
         #wmaps = glob.glob(galdir + '*_swpweight.fits')
         #for wmap in wmaps:
         #    w = fits.open(wmap)
 
+        # get data
         f = fits.open(pathdetect)
         fdata = f[1].data
         wcs = WCS(f[1].header)
@@ -486,7 +516,7 @@ class SCubes(object):
         sewcat = self.run_sex(f, galaxy=galaxy, tile=tile, size=size)
         sewpos = np.transpose((sewcat['table']['X_IMAGE'], sewcat['table']['Y_IMAGE']))
         radius = sewcat['table']['FWHM_IMAGE'] / 0.55
-        sidelim = 200
+        sidelim = 50
         mask = sewcat['table']['CLASS_STAR'] > 0.05
         mask &= (sewcat['table']['X_IMAGE'] > sidelim)
         mask &= (sewcat['table']['X_IMAGE'] < fdata.shape[0] - sidelim)
@@ -495,23 +525,34 @@ class SCubes(object):
         sewregions = [CirclePixelRegion(center=PixCoord(x, y), radius=z)
                       for (x, y), z in zip(sewpos[mask], radius[mask])]
 
-        #daocat = self.run_DAOfinder(fdata)
-        #positions = np.transpose((daocat['xcentroid'], daocat['ycentroid']))
-        # daoregions = CircularAperture(positions, r=3.)
+        daocat = self.run_DAOfinder(fdata)
+        daopos = np.transpose((daocat['xcentroid'], daocat['ycentroid']))
+        daorad = 4 * (abs(daocat['sharpness']) + abs(daocat['roundness1']) + abs(daocat['roundness2']))
+        #daoregions = CircularAperture(daopos, r=3.)
+        daoregions = [CirclePixelRegion(center=PixCoord(x, y), radius=z)
+                      for (x, y), z in zip(daopos, daorad)]
 
         #plt.figure(figsize=(10, 10))
         plt.rcParams['figure.figsize'] = (12.0, 10.0)
         plt.ion()
 
-        ax1 = plt.subplot(221)
-        path2png: str = os.path.join(galdir, "{0}.png".format(galaxy))
-        img = mpimg.imread(path2png)
-        ax1.imshow(img)
-        #plt.setp(ax1.get_yticklabels(), visible=False)
+        ax1 = plt.subplot(221, projection=wcs)
+        # make colour image
+        rgb = self.make_Lupton_colorstamp(galaxy=galaxy, tile=tile, size=size)
+        ax1.imshow(rgb, origin='lower')
+        #daoregions.plot(color='y', lw=1.5, alpha=0.5)
+        for dregion in daoregions:
+            dregion.plot(ax=ax1, color='m')
+        for sregion in sewregions:
+            sregion.plot(ax=ax1, color='g')
+        ax1.set_xlabel('RA')
+        ax1.set_ylabel('Dec')
 
         ax2 = plt.subplot(222, projection=wcs)
         ax2.imshow(fdata, cmap='Greys_r', origin='lower', vmin=-0.1, vmax=3.5)
         #daoregions.plot(color='y', lw=1.5, alpha=0.5)
+        for dregion in daoregions:
+            dregion.plot(ax=ax2, color='m')
         for sregion in sewregions:
             sregion.plot(ax=ax2, color='g')
         ax2.set_xlabel('RA')
@@ -524,24 +565,31 @@ class SCubes(object):
         ax3 = plt.subplot(223, projection=wcs)
         ax3.imshow(sdata, origin='lower', interpolation='none', cmap='nipy_spectral_r', vmin=1)
         #daoregions.plot(color='y', lw=1.5, alpha=0.5)
+        for dregion in daoregions:
+            dregion.plot(ax=ax3, color='m')
         for sregion in sewregions:
             sregion.plot(ax=ax3, color='g')
         ax3.set_xlabel('RA')
         ax3.set_ylabel('Dec')
+        #plt.canvas.mpl_connect('pick_event', self.pickSegReg)
 
         ax4 = plt.subplot(224, projection=wcs)
         #galindexes = [1, 2, 3, 5, 7, 8, 29, 28, 27, 119, 71, 6, 107, 88, 4, 83, 26, 115,
         #           112, 4, 61, 80, 25]
-        galindexes = [] if self.galindexes is None else self.galindexes
+        galindexes = [] if galindexes is None else galindexes
         gmask = np.zeros(sdata.shape)
         for num in galindexes:
             gmask[sdata == num] = 1
         maskeddata = fdata * gmask
         #daoregions.plot(color='y', lw=1.5, alpha=0.5)
-        for sregion in sewregions:
+        for dregion in daoregions:
+            dregion.plot(ax=ax4, color='m')
+        for n, sregion in enumerate(sewregions):
             sregion.plot(ax=ax4, color='g')
-            mask = sregion.to_mask()
-            maskeddata[mask.bbox.slices] *= 1 - mask.data
+            ax4.annotate(repr(n), (sregion.center.x, sregion.center.y), color='green')
+            if n in maskstar:
+                mask = sregion.to_mask()
+                maskeddata[mask.bbox.slices] *= 1 - mask.data
         ax4.imshow(maskeddata, cmap='Greys_r', origin='lower', vmin=-0.1, vmax=3.5)
 
         ax4.set_xlabel('RA')
@@ -560,8 +608,11 @@ class SCubes(object):
         if savemask:
             path2mask: str = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.fits".format(
                 galaxy, tile, size, 'mask'))
+            print('saving mask', path2mask)
             fitsmask.writeto(path2mask, overwrite=True)
-            with open(os.path.join(galdir, "{}_{}_galindexes.txt".format(galaxy, tile)), 'w') as ix:
+            indexesfile = open(os.path.join(galdir, "{}_{}_galindexes.txt".format(galaxy, tile)), 'w')
+            print('saving masked indexes to', indexesfile)
+            with indexesfile as ix:
                 for num in galindexes:
                     ix.write(repr(num) + " ")
             ix.close()
@@ -569,6 +620,7 @@ class SCubes(object):
         if savefig:
             path2fig: str = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.png".format(
                 galaxy, tile, size, 'maskMosaic'))
+            print('saving fig', path2fig)
             plt.savefig(path2fig, format='png', dpi=180)
 
         return fitsmask
@@ -603,15 +655,15 @@ class SCubes(object):
         fnu_unit = u.erg / u.s / u.cm / u.cm / u.Hz
         imtype = {"swp": "DATA", "swpweight": "WEIGHTS"}
         hfields = ["GAIN", "PSFFWHM", "DATE-OBS"]
-        for field, size in itertools.product(fields, sizes):
-            cubename = os.path.join(galdir, "{0}_{1}_{2}x{2}_cube.fits".format(galaxy, field,
+        for tile, size in itertools.product(fields, sizes):
+            cubename = os.path.join(galdir, "{0}_{1}_{2}x{2}_cube.fits".format(galaxy, tile,
                                                                    size))
             if os.path.exists(cubename) and not redo:
                 print('cube exists!')
                 continue
             # Loading and checking images
             imgs = [os.path.join(galdir, "{0}_{1}_{2}_{3}x{3}_swp.fits".format(
-                galaxy, field, band, size)) for band in bands]
+                galaxy, tile, band, size)) for band in bands]
             # Checking if images have calibration available
             headers = [fits.getheader(img, ext=1) for img in imgs]
             if not all(["MAGZP" in h for h in headers]):
@@ -619,7 +671,7 @@ class SCubes(object):
             headers = [fits.getheader(img, ext=1) for img in imgs]
             # Checking if weight images are available
             wimgs = [os.path.join(galdir, "{0}_{1}_{2}_{3}x{3}_swpweight.fits".format(
-                galaxy, field, band, size)) for band in bands]
+                galaxy, tile, band, size)) for band in bands]
             has_errs = all([os.path.exists(_) for _ in wimgs])
             # Making new header with WCS
             h = headers[0].copy()
@@ -685,8 +737,14 @@ class SCubes(object):
                 hdu.header["BUNIT"] = ("{}".format(flam_unit),
                                        "Physical units of the array values")
             if get_mask:
-                imagemask = self.calc_masks(galaxy=galaxy, tile=field, size=size,
-                                            savemask=True, savefig=True)
+                path2mask: str = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.fits".format(
+                    galaxy, tile, size, 'mask'))
+                if os.path.isfile(path2mask):
+                    imagemask = fits.open(path2mask)
+                else:
+                    Warning('mask will be blank. Run interactively calc_masks() to determine true value of the galaxy')
+                    imagemask = self.calc_masks(galaxy=galaxy, tile=tile, size=size,
+                                                savemask=True, savefig=True)
                 hdu3 = fits.ImageHDU(imagemask[0].data, imagemask[0].header)
                 hdu3.header["EXTNAME"] = ("MASK", "Boolean mask of the galaxy")
                 hdus.append(hdu3)
