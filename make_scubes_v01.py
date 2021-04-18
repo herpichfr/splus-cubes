@@ -63,11 +63,9 @@ class SCubes(object):
         self.coords = [['02:46:25.15', '-00:29:55.45']]
         self.tiles = ['STRIPE82-0059']
         self.sizes = np.array([100])
-        self.work_dir: str = '/home/herpich/Documents/pos-doc/t80s/scubes/'
-        # self.tile_dir = os.path.join(self.work_dir, self.fields[0])
-        # self.gal_dir = os.path.join(self.work_dir, self.galaxies[0])
-        self.data_dir = '/home/herpich/Documents/pos-doc/t80s/scubes/data/'
-        self.zpcorr_dir = '/home/herpich/Documents/pos-doc/t80s/scubes/data/zpcorr_idr3/'
+        self.work_dir: str = os.getcwd()
+        self.data_dir: str  = os.path.join(self.work_dir, 'data/')
+        self.zpcorr_dir: str = os.path.join(self.work_dir, 'data/zpcorr_idr3/')
 
         # from Kadu's context
         self.ps = 0.55 * u.arcsec / u.pixel
@@ -430,14 +428,14 @@ class SCubes(object):
                     "PHOT_AUTOPARAMS": '3.0,1.82',
                     "PHOT_PETROPARAMS": '2.0,2.73',
                     "PHOT_FLUXFRAC": '0.2,0.5,0.7,0.9',
-                    "SATUR_LEVEL": 1947.8720989,
+                    "SATUR_LEVEL": 1600.0,
                     "MAG_ZEROPOINT": 20,
                     "MAG_GAMMA": 4.0,
                     "GAIN": gain,
                     "PIXEL_SCALE": 0.55,
                     "SEEING_FWHM": fwhm,
                     "STARNNW_NAME": os.path.join(self.data_dir, 'sex_data/default.nnw'),
-                    "BACK_SIZE": 256,
+                    "BACK_SIZE": 84,
                     "BACK_FILTERSIZE": 7,
                     "BACKPHOTO_TYPE": "LOCAL",
                     "BACKPHOTO_THICK": 48,
@@ -471,8 +469,8 @@ class SCubes(object):
         size = self.sizes[0] if size is None else size
         galdir = os.path.join(outdir, galaxy)
         bands = self.bands
-        blues = ['U', 'F378', 'F395', 'F410', 'F515']
-        greens = ['G', 'R', 'F660']
+        blues = ['G', 'U', 'F378', 'F395', 'F410', 'F430']
+        greens = ['R', 'F660', 'F515']
         reds = ['I', 'F861', 'Z']
 
         bimgs = [os.path.join(galdir, "{0}_{1}_{2}_{3}x{3}_swp.fits".format(
@@ -485,14 +483,14 @@ class SCubes(object):
             galaxy, tile, band, size)) for band in reds]
         rdata = sum([fits.getdata(img) for img in rimgs])
         gal = os.path.join(galdir, galaxy + '.png')
-        #rgb = make_lupton_rgb(rdata, gdata, bdata, Q=10, stretch=0.5, filename=gal)
-        rgb = make_lupton_rgb(rdata, gdata, bdata, filename=gal)
+        rgb = make_lupton_rgb(rdata, gdata, bdata, minimum=-0.01, Q=20, stretch=0.9, filename=gal)
+        #rgb = make_lupton_rgb(rdata, gdata, bdata, filename=gal)
         ax = plt.imshow(rgb, origin='lower')
 
         return rgb
 
     def calc_masks(self, galaxy: str=None, tile: str=None, size: int=None, savemask: bool=False,
-                   savefig: bool=False, galindexes: list=[], maskstar: list=[]):
+                   savefig: bool=False, galindexes: list=[], maskstars: list=[]):
         """
         Calculate masks for S-PLUS stamps. Masks will use the catalogue of stars and from the
         SExtractor segmentation image. Segmentation regions need to be manually selected
@@ -576,7 +574,7 @@ class SCubes(object):
         ax4 = plt.subplot(224, projection=wcs)
         #galindexes = [1, 2, 3, 5, 7, 8, 29, 28, 27, 119, 71, 6, 107, 88, 4, 83, 26, 115,
         #           112, 4, 61, 80, 25]
-        galindexes = [] if galindexes is None else galindexes
+        #galindexes = [] if galindexes is None else galindexes
         gmask = np.zeros(sdata.shape)
         for num in galindexes:
             gmask[sdata == num] = 1
@@ -587,7 +585,7 @@ class SCubes(object):
         for n, sregion in enumerate(sewregions):
             sregion.plot(ax=ax4, color='g')
             ax4.annotate(repr(n), (sregion.center.x, sregion.center.y), color='green')
-            if n in maskstar:
+            if n in maskstars:
                 mask = sregion.to_mask()
                 maskeddata[mask.bbox.slices] *= 1 - mask.data
         ax4.imshow(maskeddata, cmap='Greys_r', origin='lower', vmin=-0.1, vmax=3.5)
@@ -610,12 +608,18 @@ class SCubes(object):
                 galaxy, tile, size, 'mask'))
             print('saving mask', path2mask)
             fitsmask.writeto(path2mask, overwrite=True)
-            indexesfile = open(os.path.join(galdir, "{}_{}_galindexes.txt".format(galaxy, tile)), 'w')
+            indexesfile = open(os.path.join(galdir, "{0}_{1}_{2}x{2}_galindexes.txt".format(galaxy, tile, size)), 'w')
+            sexstarsfile = open(os.path.join(galdir, "{0}_{1}_{2}x{2}_sexstars.txt".format(galaxy, tile, size)), 'w')
+            print('saving masked indexes to', indexesfile)
             print('saving masked indexes to', indexesfile)
             with indexesfile as ix:
                 for num in galindexes:
                     ix.write(repr(num) + " ")
             ix.close()
+            with sexstarsfile as sx:
+                for num in maskstars:
+                    sx.write(repr(num) + " ")
+            sx.close()
 
         if savefig:
             path2fig: str = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.png".format(
@@ -629,15 +633,12 @@ class SCubes(object):
                    bands=None, specz="", photz="", bscale: float=1e-19):
         """ Get results from cutouts and join them into a cube. """
 
-        #indir = os.path.join(self.work_dir, self.names[0]) if galdir is None else galdir
-        #if not os.path.isdir(indir):
-        #    os.mkdir(indir)
-        galdir = os.path.join(self.work_dir, self.galaxies[0]) if galdir is None else galdir
+        galcoords = SkyCoord(ra=self.coords[0][0], dec=self.coords[0][1], unit=(u.hour, u.deg))
+        galaxy = "{}_{}".format(galcoords.ra.value, galcoords.dec.value) if self.galaxies[0] is None else self.galaxies[0]
+        galdir = os.path.join(self.work_dir, galaxy) if galdir is None else galdir
         if not os.path.isdir(galdir):
             os.mkdir(galdir)
         filenames = glob.glob(galdir + '/*_swp*.fits')
-        galcoords = SkyCoord(ra=self.coords[0][0], dec=self.coords[0][1], unit=(u.hour, u.deg))
-        galaxy = "{}_{}".format(galcoords.ra.value, galcoords.dec.value) if self.galaxies[0] is None else self.galaxies[0]
         if redo:
             self.make_stamps_splus(redo=True)
             filenames = glob.glob(galdir + '/*_swp*.fits')
@@ -742,9 +743,75 @@ class SCubes(object):
                 if os.path.isfile(path2mask):
                     imagemask = fits.open(path2mask)
                 else:
-                    Warning('mask will be blank. Run interactively calc_masks() to determine true value of the galaxy')
+                    indexesfile = os.path.join(galdir, "{0}_{1}_{2}x{2}_galindexes.txt".format(galaxy, tile, size))
+                    if not os.path.isfile(indexesfile):
+                        galindexes = []
+                    else:
+                        with open(indexesfile, 'r') as idxf:
+                            galindexes = [int(i.replace("'", '')) for i in idxf.readlines()[0].split()]
+                    print('current galindexes are', galindexes)
+
+                    self.calc_masks(galaxy=galaxy, tile=tile, size=size,
+                                    savemask=False, savefig=False, galindexes=galindexes)
+                    calc_indexes = True
+                    while calc_indexes:
+                        q1 = input('do you want to redo the galindexes? [y|r|n|q]: ')
+                        if q1 == 'y':
+                            newindx = input('type new space separated indexes: ')
+                            galindexes += [int(i) for i in newindx.split()]
+                            print('current galindexes are', galindexes)
+                            self.calc_masks(galaxy=galaxy, tile=tile, size=size,
+                                            savemask=False, savefig=False, galindexes=galindexes)
+                            calc_indexes = True
+                        elif q1 == 'r':
+                            galindexes = []
+                        elif q1 == 'n':
+                            galindexes = galindexes
+                            calc_indexes = False
+                        elif q1 == 'q':
+                            Warning('leaving!')
+                            return
+                        elif q1 == '':
+                            calc_indexes = True
+                        else:
+                            raise IOError('option not recognized')
+
+                    sexstarsfile = os.path.join(galdir, "{0}_{1}_{2}x{2}_sexstars.txt".format(galaxy, tile, size))
+                    if not os.path.isfile(sexstarsfile):
+                        maskstars = []
+                    else:
+                        with open(sexstarsfile, 'r') as idxf:
+                            maskstars = [int(i.replace("'", '')) for i in idxf.readlines()[0].split()]
+                    print('current stars numbers are', galindexes)
+
+                    mask_sexstars = True
+                    while mask_sexstars:
+                        q1 = input('do you want to mask SExtractor stars? [y|r|n|q]: ')
+                        if q1 == 'y':
+                            newindx = input('type (space separated) the stars numbers: ')
+                            maskstars += [int(i) for i in newindx.split()]
+                            print('current stars numbers are', galindexes)
+                            self.calc_masks(galaxy=galaxy, tile=tile, size=size,
+                                            savemask=False, savefig=False, galindexes=galindexes,
+                                            maskstars=maskstars)
+                            mask_sexstars = True
+                        elif q1 == 'r':
+                            maskstars = []
+                        elif q1 == 'n':
+                            maskstars = maskstars
+                            mask_sexstars = False
+                        elif q1 == 'q':
+                            Warning('leaving!')
+                            return
+                        elif q1 == '':
+                            mask_sexstars = True
+                        else:
+                            raise IOError('option not recognized')
+
                     imagemask = self.calc_masks(galaxy=galaxy, tile=tile, size=size,
-                                                savemask=True, savefig=True)
+                                                savemask=True, savefig=True,
+                                                galindexes=galindexes, maskstars=maskstars)
+
                 hdu3 = fits.ImageHDU(imagemask[0].data, imagemask[0].header)
                 hdu3.header["EXTNAME"] = ("MASK", "Boolean mask of the galaxy")
                 hdus.append(hdu3)
@@ -765,18 +832,27 @@ if __name__ == "__main__":
     # out = scubes.get_zps()
     # out = scubes.get_zp_correction()
     # out = scubes.calibrate_stamps()
+    scubes.work_dir = '/home/herpich/Documents/pos-doc/t80s/scubes/'
+    scubes.data_dir = '/home/herpich/Documents/pos-doc/t80s/scubes/data/'
+    scubes.zpcorr_dir = '/home/herpich/Documents/pos-doc/t80s/scubes/data/zpcorr_idr3/'
+
+    # NGC1374
     scubes.galaxies = np.array(['NGC1374'])
     scubes.coords = [['03:35:16.598', '-35:13:34.50']]
     scubes.tiles = ['SPLUS-s27s34']
-    scubes.sizes = np.array([600])  # max(A, B) * 100
-    #tile = scubes.check_infoot(save_output=False)
-    # scubes.foot_dir = './'#'/home/luna/Documentos/usp/ic/fabio/aladin/'
-    # scubes.zpcorr_dir = '/home/luna/Documentos/usp/ic/fabio/splus-cubes/data/zpcorr_idr3/'
-    #scubes.sizes = np.array([600])  # max(A, B) * 100
-    #scubes.galindexes = [1, 2, 3, 5, 7, 8, 29, 28, 27, 119, 71, 6, 107, 88, 4, 83,
-    #                     26, 115, 112, 4, 61, 80, 25]
-    #scubes.make_cubes(redo=False, specz=0.004755)
-    #scubes.tiles_dir = './'
-    #scubes.fields = ['SPLUS-s27a34']
-    # scubes.make_det_stamp()
-    #scubes.make_stamps_splus()
+    scubes.sizes = np.array([600])
+    specz = 0.004443
+
+    # # NGC1399
+    # scubes.galaxies = np.array(['NGC1399'])
+    # scubes.coords = [['03:38:29.083', '-35:27:02.67']]
+    # scubes.tiles = ['SPLUS-s27s34']
+    # scubes.sizes = np.array([1800])
+    # specz = 0.004755
+
+    # # NGC1087
+    # scubes.galaxies = np.array(['NGC1087'])
+    # scubes.coords = [['02:46:25.15', '-00:29:55.45']]
+    # scubes.tiles = ['STRIPE82-0059']
+    # scubes.sizes = np.array([600])
+    # specz = 0.005070
