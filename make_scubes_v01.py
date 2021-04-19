@@ -429,6 +429,7 @@ class SCubes(object):
                     "PHOT_PETROPARAMS": '2.0,2.73',
                     "PHOT_FLUXFRAC": '0.2,0.5,0.7,0.9',
                     "SATUR_LEVEL": 1600.0,
+                    # "SATUR_LEVEL": 1900.0,
                     "MAG_ZEROPOINT": 20,
                     "MAG_GAMMA": 4.0,
                     "GAIN": gain,
@@ -436,6 +437,7 @@ class SCubes(object):
                     "SEEING_FWHM": fwhm,
                     "STARNNW_NAME": os.path.join(self.data_dir, 'sex_data/default.nnw'),
                     "BACK_SIZE": 84,
+                    # "BACK_SIZE": 48,
                     "BACK_FILTERSIZE": 7,
                     "BACKPHOTO_TYPE": "LOCAL",
                     "BACKPHOTO_THICK": 48,
@@ -639,6 +641,12 @@ class SCubes(object):
         if not os.path.isdir(galdir):
             os.mkdir(galdir)
         filenames = glob.glob(galdir + '/*_swp*.fits')
+        while len(filenames) < 24:
+            self.make_stamps_splus(redo=True)
+            filenames = glob.glob(galdir + '/*_swp*.fits')
+            if len(filenames) < 24:
+                raise IOError('Tile file missing for stamps')
+
         if redo:
             self.make_stamps_splus(redo=True)
             filenames = glob.glob(galdir + '/*_swp*.fits')
@@ -836,12 +844,12 @@ if __name__ == "__main__":
     scubes.data_dir = '/home/herpich/Documents/pos-doc/t80s/scubes/data/'
     scubes.zpcorr_dir = '/home/herpich/Documents/pos-doc/t80s/scubes/data/zpcorr_idr3/'
 
-    # NGC1374
-    scubes.galaxies = np.array(['NGC1374'])
-    scubes.coords = [['03:35:16.598', '-35:13:34.50']]
-    scubes.tiles = ['SPLUS-s27s34']
-    scubes.sizes = np.array([600])
-    specz = 0.004443
+    # # NGC1374
+    # scubes.galaxies = np.array(['NGC1374'])
+    # scubes.coords = [['03:35:16.598', '-35:13:34.50']]
+    # scubes.tiles = ['SPLUS-s27s34']
+    # scubes.sizes = np.array([600])
+    # specz = 0.004443
 
     # # NGC1399
     # scubes.galaxies = np.array(['NGC1399'])
@@ -856,3 +864,10 @@ if __name__ == "__main__":
     # scubes.tiles = ['STRIPE82-0059']
     # scubes.sizes = np.array([600])
     # specz = 0.005070
+
+    # NGC1365
+    scubes.galaxies = np.array(['NGC1365'])
+    scubes.coords = [['03:33:36.458', '-36:08:26.37']]
+    scubes.tiles = ['SPLUS-s28s33']
+    scubes.sizes = np.array([1800])
+    specz = 0.005476
