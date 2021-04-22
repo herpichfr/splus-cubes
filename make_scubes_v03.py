@@ -83,6 +83,9 @@ class SCubes(object):
         self.satur_level: float = 1600.0  # use 1600 for elliptical
         self.back_size: int = 54  # use 54 for elliptical or 256 for spiral
 
+        # configuration for source selection within make_masks()
+        self.class_star = 0.8
+
         # from Kadu's context
         self.ps = 0.55 * u.arcsec / u.pixel
         self.bands = ['U', 'F378', 'F395', 'F410', 'F430', 'G', 'F515', 'R',
@@ -466,7 +469,8 @@ class SCubes(object):
         pass
 
     def calc_masks(self, galaxy: str=None, tile: str=None, size: int=None, savemask: bool=False,
-                   savefig: bool=False, maskstars: list=[], angsize: float=None):
+                   savefig: bool=False, maskstars: list=[], angsize: float=None,
+                   class_star: float=None):
         """
         Calculate masks for S-PLUS stamps. Masks will use the catalogue of stars and from the
         SExtractor segmentation image. Segmentation regions need to be manually selected
@@ -480,6 +484,7 @@ class SCubes(object):
         galdir = os.path.join(outdir, galaxy)
         pathdetect: str = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.fits".format(
             galaxy, tile, size, 'det_scimas'))
+        class_star = self.class_star if class_star is None else class_star
 
         # get data
         f = fits.open(pathdetect)
@@ -496,7 +501,7 @@ class SCubes(object):
         sewcat = self.run_sex(f, galaxy=galaxy, tile=tile, size=size)
         sewpos = np.transpose((sewcat['table']['X_IMAGE'], sewcat['table']['Y_IMAGE']))
         radius = 3.0 * (sewcat['table']['FWHM_IMAGE'] / 0.55)
-        mask = sewcat['table']['CLASS_STAR'] > 0.05
+        mask = sewcat['table']['CLASS_STAR'] > class_star
         sewregions = [CirclePixelRegion(center=PixCoord(x, y), radius=z)
                       for (x, y), z in zip(sewpos[mask], radius[mask])]
 
