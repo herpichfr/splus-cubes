@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """
- tool to produce calibrated cubes from S-PLUS images
- Herpich F. R. herpich@usp.br - 2021-03-09
+ Tool to produce calibrated cubes from S-PLUS images
+ Herpich F. R. fabiorafaelh@gmail.com - 2021-03-09
 
  based/copied/stacked from Kadu's scripts
+
+ ***
+ Edited and adapted to python3.* - 2023-03-06
 """
 from __future__ import print_function, division
 
@@ -11,77 +14,60 @@ import os
 import glob
 import itertools
 import warnings
-# from getpass import getpass
 
 import numpy as np
+from scipy.interpolate import RectBivariateSpline
 import astropy.units as u
 from astropy.table import Table
-from astropy.io import fits, ascii
+from astropy.io import fits
+import pandas as pd
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from astropy.nddata.utils import Cutout2D
 import astropy.constants as const
-from astropy.stats import sigma_clipped_stats
 from astropy.wcs import FITSFixedWarning
-from astropy.wcs.utils import pixel_to_skycoord as pix2sky
 from astropy.wcs.utils import skycoord_to_pixel as sky2pix
-import pandas as pd
-from scipy.interpolate import RectBivariateSpline
-from astropy.visualization import make_lupton_rgb
+from regions import PixCoord, CirclePixelRegion
 from tqdm import tqdm
 import sewpy
+from astropy.visualization import make_lupton_rgb
 import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
-from regions import PixCoord, CirclePixelRegion
+import datetime
 
 from photutils import DAOStarFinder
-# from photutils import CircularAperture
-
-# testing out mgefit
-import mgefit
-from mgefit.find_galaxy import find_galaxy
-from mgefit.mge_fit_1d import mge_fit_1d
-from mgefit.sectors_photometry import sectors_photometry
-from mgefit.mge_fit_sectors import mge_fit_sectors
-from mgefit.mge_print_contours import mge_print_contours
-from mgefit.mge_fit_sectors_twist import mge_fit_sectors_twist
-from mgefit.sectors_photometry_twist import sectors_photometry_twist
-from mgefit.mge_print_contours_twist import mge_print_contours_twist
 
 warnings.simplefilter('ignore', category=FITSFixedWarning)
 
-lastversion = '0.1'
-moddate = '2021-03-09'
-
 initext = """
     ===================================================================
-                    make_scubes - v%s - %s
+                    make_scubes
              This version is not yet completely debugged
              In case of crashes, please send the log to:
                 Herpich F. R. fabiorafaelh@gmail.com
     ===================================================================
-    """ % (lastversion, moddate)
+    """
 
 
 class SCubes(object):
     def __init__(self):
         """basic definitions"""
 
-        # self.names = np.array(['NGC1087', 'NGC1090'])
-        # self.coords = [['02:46:25.15', '-00:29:55.45'],
-        #               ['02:46:33.916', '-00:14:49.35']]
         self.galaxies = np.array(['NGC1087'])
         self.coords = [['02:46:25.15', '-00:29:55.45']]
         self.tiles = ['STRIPE82-0059']
         self.sizes = np.array([100])
         self.angsize = None
         self.work_dir: str = os.getcwd()
-        self.data_dir: str  = os.path.join(self.work_dir, 'data/')
+        self.data_dir: str = os.path.join(self.work_dir, 'data/')
         self.zpcorr_dir: str = os.path.join(self.work_dir, 'data/zpcorr_idr3/')
+        self.tiles_dir = None
+        self.zp_table = 'iDR4_zero-points.csv'
+        # self.sexpath = '/home/herpich/bin/sextractor/src/sex'
 
         # SExtractor contraints
         self.satur_level: float = 1600.0  # use 1600 for elliptical
         self.back_size: int = 54  # use 54 for elliptical or 256 for spiral
+        self.detect_thresh = 1.1
 
         # from Kadu's context
         self.ps = 0.55 * u.arcsec / u.pixel
@@ -101,9 +87,12 @@ class SCubes(object):
                          "F430": 171, "F515": 183, "F660": 870, "F861": 240,
                          "G": 99, "I": 138, "R": 120, "U": 681,
                          "Z": 168}
+        self.names_correspondent = {'U': 'u', 'F378': 'J0378', 'F395': 'J0395',
+                                    'F410': 'J0410', 'F430': 'J0430', 'G': 'g',
+                                    'F515': 'J0515', 'R': 'r', 'F660': 'J0660',
+                                    'I': 'i', 'F861': 'J0861', 'Z': 'z'}
 
-    def make_stamps_splus(self, redo=False, img_types=None, bands=None,
-                          savestamps=True):
+    def make_stamps_splus(self, redo=False, img_types=None, bands=None, savestamps=True):
         """  Produces stamps of objects in S-PLUS from a table of names,
         coordinates.
 
@@ -148,12 +137,14 @@ class SCubes(object):
         sizes = sizes.astype(np.int)
         img_types = ["swp", "swpweight"] if img_types is None else img_types
         work_dir = os.getcwd() if self.work_dir is None else self.work_dir
-        tile_dir = os.getcwd() if self.work_dir is None else os.path.join(self.work_dir, self.tiles[0])
+        tile_dir = os.getcwd() if self.tiles_dir is None else os.path.join(self.tiles_dir, self.tiles[0])
         header_keys = ["OBJECT", "FILTER", "EXPTIME", "GAIN", "TELESCOP",
                        "INSTRUME", "AIRMASS"]
         bands = self.bands if bands is None else bands
 
         # Selecting tiles from S-PLUS footprint
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+              '- Selecting tile names from the S-PLUS footprint')
         cols = [self.galaxies,
                 np.transpose(self.coords)[0],
                 np.transpose(self.coords)[1],
@@ -178,7 +169,7 @@ class SCubes(object):
                     try:
                         header = fits.getheader(fitsfile)
                         data = fits.getdata(fitsfile)
-                    except:  # os.path.isfile(os.path.join(tile_dir + field['TILE'] + '_' + band + '_' + img_type + '.fz')):
+                    except:
                         fzfile = os.path.join(tile_dir, field['TILE'] + '_' + band + '_' + img_type + '.fz')
                         f = fits.open(fzfile)[1]
                         header = f.header
@@ -221,18 +212,16 @@ class SCubes(object):
                         if savestamps:
                             if not os.path.exists(galdir):
                                 os.mkdir(galdir)
-                            print('saving', output)
+                            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                                  'Saving', output)
                             hdulist.writeto(output, overwrite=True)
                         else:
-                            print('To be implemented')
+                            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                                  'To be implemented')
                             # stamps[img_type].append(hdulist)
-        # if savestamps:
-        #    return
-        # else:
-        #    return stamps
 
     def make_det_stamp(self, savestamp: bool=True):
-        """Cut the a stamp of the same size as the cube stamps to be used for the mask"""
+        """Cut the detection stamp of the same size as the cube stamps to be used for the mask"""
 
         names = np.atleast_1d(self.galaxies)
         sizes = np.atleast_1d(self.sizes)
@@ -242,12 +231,11 @@ class SCubes(object):
         outdir = os.getcwd() if self.work_dir is None else self.work_dir
         if not os.path.isdir(outdir):
             os.mkdir(outdir)
-        tile_dir = os.getcwd() if self.work_dir is None else os.path.join(self.work_dir, self.tiles[0])
+        tile_dir = os.getcwd() if self.tiles_dir is None else os.path.join(self.tiles_dir, self.tiles[0])
         header_keys = ["OBJECT", "FILTER", "EXPTIME", "GAIN", "TELESCOP",
                        "INSTRUME", "AIRMASS"]
 
         # Selecting tiles from S-PLUS footprint
-        # fields = self.check_infoot() if self.fields is None else self.fields
         cols = [self.galaxies,
                 np.transpose(self.coords)[0],
                 np.transpose(self.coords)[1],
@@ -256,11 +244,12 @@ class SCubes(object):
         fields = Table(cols, names=names)
 
         # Producing stamps
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+              'Creating detection stamp for stars detection')
         for field in fields:
             field_name = field["TILE"]
             fnames = [field['NAME']]
-            fcoords = SkyCoord(ra=field['RA'], dec=field['DEC'],
-                               unit=(u.hour, u.deg))  # self.coords[idx]
+            fcoords = SkyCoord(ra=field['RA'], dec=field['DEC'], unit=(u.hour, u.deg))
             fsizes = np.array(sizes)[fields['NAME'] == fnames]
             for i, (name, size) in enumerate(zip(fnames, fsizes)):
                 galdir = os.path.join(outdir, name)
@@ -268,12 +257,15 @@ class SCubes(object):
                     os.makedirs(galdir)
                 doutput = os.path.join(galdir,
                                        "{0}_{1}_{2}x{2}_{3}.fits".format(
-                                           name, field_name, size, 'det_scimas'))
+                                           name, field_name, size, 'detection'))
                 if not os.path.isfile(doutput):
                     try:
-                        d = fits.open(os.path.join(tile_dir, field_name + '_det_scimas.fits'))[0]
+                        d = fits.open(os.path.join(tile_dir, field_name + '_detection.fits'))[0]
                     except:
-                        d = fits.open(os.path.join(tile_dir, field_name + '_det_scimas.fits.fz'))[1]
+                        d = fits.open(os.path.join(tile_dir, field_name + '_detection.fits.fz'))[1]
+                    else:
+                        Warning('Detection image not found. Using rSDSS...')
+                        d = fits.open(os.path.join(self.tiles_dir, self.tiles[0], field_name, field_name + '_R_swp.fz'))
                     dheader = d.header
                     ddata = d.data
                     wcs = WCS(dheader)
@@ -293,26 +285,21 @@ class SCubes(object):
                     hdu.header.update(dcutout.wcs.to_header())
                     hdulist = fits.HDUList([fits.PrimaryHDU(), hdu])
                     if savestamp:
-                        print('saving', doutput)
+                        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                              'Saving', doutput)
                         hdulist.writeto(doutput, overwrite=True)
 
-    def get_zps(self, tile: str=None, tile_dir: str=None):
-        """ Load all tables with zero points for iDR3. """
-        _dir = self.data_dir if tile_dir is None else tile_dir
+    def get_zps(self, tile: str=None, zp_dir: str=None, zp_table: str=None):
+        """ Load zero points."""
+        _dir = self.work_dir if zp_dir is None else zp_dir
         tile = self.tiles[0] if tile is None else tile
-        # tables = []
-        # for fname in os.listdir(_dir):
-        #    filename = os.path.join(_dir, fname)
-        #    #data = np.genfromtxt(filename, dtype=None)
-        #    data = ascii.read(filename)
-        #    h = [s.replace("SPLUS_", "") for s in data.keys()]
-        #    table = Table(data, names=h)
-        #    tables.append(table)
-        # zptable = np.vstack(tables)
-        filename = os.path.join(_dir, tile + '_ZP.cat')
-        data = ascii.read(filename)
-        h = [s.replace("SPLUS_", "") for s in data.keys()]
-        zptab = Table(data, names=h)
+        zp_table = self.zp_table if zp_table is None else zp_table
+
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+              'Reading ZPs table:', os.path.join(_dir, zp_table))
+        zpt = pd.read_csv(os.path.join(_dir, zp_table))
+        zpt.columns = [a.replace('ZP_', '') for a in zpt.columns]
+        zptab = zpt[zpt['Field'] == tile]
 
         return zptab
 
@@ -321,6 +308,8 @@ class SCubes(object):
         x0, x1, nbins = 0, 9200, 16
         xgrid = np.linspace(x0, x1, nbins + 1)
         zpcorr = {}
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+              'Getting ZP corrections for the S-PLUS bands...')
         for band in self.bands:
             corrfile = os.path.join(self.zpcorr_dir, 'SPLUS_' + band + '_offsets_grid.npy')
             corr = np.load(corrfile)
@@ -335,15 +324,17 @@ class SCubes(object):
 
         galaxy = self.galaxies[0] if galaxy is None else galaxy
         tile = os.listdir(self.work_dir + galaxy)[0].split('_')[1] if self.tiles is None else self.tiles[0]
-        zps = self.get_zps(tile)
+        zps = self.get_zps(tile=tile)
         zpcorr = self.get_zp_correction()
         stamps = sorted([_ for _ in os.listdir(self.work_dir + galaxy) if _.endswith("_swp.fits")])
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+              'Calibrating stamps...')
         for stamp in stamps:
             filename = os.path.join(self.work_dir, galaxy, stamp)
             h = fits.getheader(filename, ext=1)
             h['TILE'] = tile
             filtername = h["FILTER"]
-            zp = float(zps[filtername].data[0])
+            zp = float(zps[self.names_correspondent[filtername]].item())
             x0 = h["X0TILE"]
             y0 = h["Y0TILE"]
             zp += round(zpcorr[filtername](x0, y0)[0][0], 5)
@@ -352,14 +343,14 @@ class SCubes(object):
 
     def run_sex(self, f: object, galaxy: str=None, tile: str=None, size: int=None):
         """ Run SExtractor to the detection stamp """
-        #workdir = self.work_dir
+
         outdir = os.getcwd() if self.work_dir is None else self.work_dir
         galaxy = galaxy if self.galaxies is None else self.galaxies[0]
         tile = tile if self.tiles is None else self.tiles[0]
         size = size if self.sizes is None else self.sizes[0]
         galdir = os.path.join(outdir, galaxy)  # if self.gal_dir is None else self.gal_dir
         pathdetect = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.fits".format(
-            galaxy, tile, size, 'det_scimas'))
+            galaxy, tile, size, 'detection'))
         pathtoseg = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.fits".format(
             galaxy, tile, size, 'segmentation'))
         sexoutput = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.fits".format(
@@ -367,14 +358,6 @@ class SCubes(object):
 
         gain = f[1].header['GAIN']
         fwhm = f[1].header['PSFFWHM']
-        wcs = WCS(f[1].header)
-        fdata = f[1].data
-
-        # calculating the limits for the stamp
-        xp, yp = np.arange(fdata.shape[0]), np.arange(fdata.shape[1])
-        nsky = pix2sky(xp, yp, wcs, origin=0, mode=u'wcs')
-        ralims = np.min(nsky.ra), np.max(nsky.ra)
-        delims = np.min(nsky.dec), np.max(nsky.dec)
 
         # output params for SExtractor
         params = ["NUMBER", "X_IMAGE", "Y_IMAGE", "KRON_RADIUS", "ELLIPTICITY",
@@ -385,8 +368,7 @@ class SCubes(object):
         config = {
             "DETECT_TYPE": "CCD",
             "DETECT_MINAREA": 4,
-            "DETECT_THRESH": 1.1,
-            # "DETECT_THRESH": 2.0,
+            "DETECT_THRESH": self.detect_thresh,
             "ANALYSIS_THRESH": 3.0,
             "FILTER": "Y",
             "FILTER_NAME": os.path.join(self.data_dir, "sex_data/tophat_3.0_3x3.conv"),
@@ -414,7 +396,10 @@ class SCubes(object):
             "CHECKIMAGE_NAME": pathtoseg
         }
 
-        sew = sewpy.SEW(config=config, sexpath="sextractor", params=params)
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+              'Running SExtractor for config:')
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', config)
+        sew = sewpy.SEW(workdir=galdir, config=config, sexpath="sex", params=params)
         sewcat = sew(pathdetect)
         sewcat["table"].write(sexoutput, format="fits", overwrite=True)
 
@@ -423,10 +408,10 @@ class SCubes(object):
     def run_DAOfinder(self, fdata: object):
         "calculate photometry using DAOfinder"
 
-        # mean, median, std = sigma_clipped_stats(fdata, sigma=3.0)
         mean, median, std = 0, 0, 0.5
-        print(('mean', 'median', 'std'))
-        print((mean, median, std))
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', ('mean', 'median', 'std'))
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', (mean, median, std))
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', 'Running DAOfinder...')
         daofind = DAOStarFinder(fwhm=4.0, sharplo=0.2, sharphi=0.9,
                                 roundlo=-0.5, roundhi=0.5, threshold=5. * std)
         sources = daofind(fdata)
@@ -445,6 +430,7 @@ class SCubes(object):
         greens = ['R', 'F660', 'F515']
         reds = ['I', 'F861', 'Z']
 
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', 'Creating Lupton RGB stamps...')
         bimgs = [os.path.join(galdir, "{0}_{1}_{2}_{3}x{3}_swp.fits".format(
             galaxy, tile, band, size)) for band in blues]
         bdata = sum([fits.getdata(img) for img in bimgs])
@@ -456,32 +442,95 @@ class SCubes(object):
         rdata = sum([fits.getdata(img) for img in rimgs])
         gal = os.path.join(galdir, f"{galaxy}_{tile}_{size}x{size}.png")
         rgb = make_lupton_rgb(rdata, gdata, bdata, minimum=-0.01, Q=20, stretch=0.9, filename=gal)
-        #rgb = make_lupton_rgb(rdata, gdata, bdata, filename=gal)
         ax = plt.imshow(rgb, origin='lower')
 
         return rgb
 
-    def test_mgefit(self):
-        """testing mgefit"""
-        pass
+    def calc_main_circle(self, f=None, centralPixCoords=None, angsize=None, size=None, galaxy=None, tile=None):
+        """Calculate main circle to identify the galaxy"""
 
-    def calc_masks(self, galaxy: str=None, tile: str=None, size: int=None, savemask: bool=False,
-                   savefig: bool=False, maskstars: list=[], angsize: float=None):
+        outdir = os.getcwd() if self.work_dir is None else self.work_dir
+        galaxy = self.galaxies[0] if galaxy is None else galaxy
+        tile = self.tiles[0] if tile is None else tile
+        galdir = os.path.join(outdir, galaxy)
+        # contraints = f[1].data < abs(np.percentile(f[1].data, 2.3))
+        fdata = f[1].data.copy()
+        wcs = WCS(f[1].header)
+        ix, iy = np.meshgrid(np.arange(fdata.shape[0]), np.arange(fdata.shape[1]))
+        distance = np.sqrt((ix - centralPixCoords[0])**2 + (iy - centralPixCoords[1])**2)
+        expand = True
+        interaction = 1
+        while expand:
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                  'Iteration number = ', interaction, '; angsize =', angsize)
+            innerMask = distance <= angsize
+            diskMask = (distance > angsize) & (distance <= angsize + 5)
+            outerMask = distance > angsize + 5
+            # fmask[innerMask] = 1
+            innerPercs = np.percentile(fdata[innerMask], [16, 50, 84])
+            diskPercs = np.percentile(fdata[diskMask], [16, 50, 84])
+            outerPercs = np.percentile(fdata[outerMask], [16, 50, 84])
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                  'Inner: [16, 50, 84]', innerPercs)
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                  'Disk: [16, 50, 84]', diskPercs)
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                  'Outer: [16, 50, 84]', outerPercs)
+            plt.ioff()
+            ax1 = plt.subplot(111, projection=wcs)
+            # make colour image
+            ax1.imshow(fdata, cmap='Greys_r', origin='lower', vmin=-0.1, vmax=3.5)
+            circregion = CirclePixelRegion(center=PixCoord(centralPixCoords[0], centralPixCoords[1]),
+                                           radius=angsize)
+            circregion.plot(color='y', lw=1.5, ax=ax1, label='%.1f pix' % angsize)
+            outcircregion = CirclePixelRegion(center=PixCoord(centralPixCoords[0], centralPixCoords[1]),
+                                           radius=angsize + 5)
+            outcircregion.plot(color='g', lw=1.5, ax=ax1, label='%.1f pix' % (angsize + 5))
+            ax1.set_title('RGB')
+            ax1.set_xlabel('RA')
+            ax1.set_ylabel('Dec')
+            ax1.legend(loc='upper left')
+
+            if diskPercs[1] <= outerPercs[1] + (outerPercs[1] - outerPercs[0]):
+                path2fig: str = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.png".format(galaxy, tile, size, 'defCircle'))
+                print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                      'Saving fig after finishing iteration:', path2fig)
+                plt.savefig(path2fig, format='png', dpi=180)
+                plt.close()
+                expand = False
+            else:
+                angsize += 5
+                print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                      'Current angsize is:', angsize, '; size/2 is:', size / 2)
+                if angsize >= size / 2:
+                    plt.show()
+                    raise ValueError('Iteration stopped. Angsize %.2f bigger than size %i' % (angsize, size / 2))
+                interaction += 1
+
+        fmask = np.zeros(f[1].data.shape)
+        fmask[distance <= angsize] = 1
+        return circregion, fdata * fmask
+
+    def calc_masks(self, galaxy: str=None, tile: str=None, size: int=None, savemask: bool=False, savefig: bool=False,
+                   maskstars: list=[], angsize: float=None, runDAOfinder: bool=False):
         """
         Calculate masks for S-PLUS stamps. Masks will use the catalogue of stars and from the
         SExtractor segmentation image. Segmentation regions need to be manually selected
         """
+
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', 'Starting masks...')
         galcoords = SkyCoord(ra=self.coords[0][0], dec=self.coords[0][1], unit=(u.hour, u.deg))
         outdir = os.getcwd() if self.work_dir is None else self.work_dir
         galaxy = self.galaxies[0] if galaxy is None else galaxy
         tile = self.tiles[0] if tile is None else tile
         size = self.sizes[0] if size is None else size
-        angsize = self.angsize * 1.1 if angsize is None else angsize * 1.1
+        angsize = self.angsize / 0.55 if angsize is None else angsize / 0.55
         galdir = os.path.join(outdir, galaxy)
-        pathdetect: str = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.fits".format(
-            galaxy, tile, size, 'det_scimas'))
+        pathdetect: str = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.fits".format(galaxy, tile, size, 'detection'))
 
         # get data
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+              'Getting detection stamp for photometry...')
         f = fits.open(pathdetect)
         ddata = f[1].data
         wcs = WCS(f[1].header)
@@ -493,6 +542,13 @@ class SCubes(object):
         fmask[constraints] = 1
         fdata *= fmask
 
+        # calculate big circle
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', 'Getting galaxy circle...')
+        circregion, maskeddata = self.calc_main_circle(f=f, centralPixCoords=centralPixCoords, angsize=angsize,
+                                                       size=size, galaxy=galaxy, tile=tile)
+
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+              'Running SExtractor to get photometry...')
         sewcat = self.run_sex(f, galaxy=galaxy, tile=tile, size=size)
         sewpos = np.transpose((sewcat['table']['X_IMAGE'], sewcat['table']['Y_IMAGE']))
         radius = 3.0 * (sewcat['table']['FWHM_IMAGE'] / 0.55)
@@ -502,78 +558,101 @@ class SCubes(object):
         mask &= (sewcat['table']['X_IMAGE'] < fdata.shape[0] - sidelim)
         mask &= (sewcat['table']['Y_IMAGE'] > sidelim)
         mask &= (sewcat['table']['Y_IMAGE'] < fdata.shape[1] - sidelim)
+        mask &= (sewcat['table']['FWHM_IMAGE'] > 0)
         sewregions = [CirclePixelRegion(center=PixCoord(x, y), radius=z)
                       for (x, y), z in zip(sewpos[mask], radius[mask])]
 
-        # daocat = self.run_DAOfinder(fdata)
-        # daopos = np.transpose((daocat['xcentroid'], daocat['ycentroid']))
-        # daorad = 4 * (abs(daocat['sharpness']) + abs(daocat['roundness1']) + abs(daocat['roundness2']))
-        # daoregions = [CirclePixelRegion(center=PixCoord(x, y), radius=z)
-        #               for (x, y), z in zip(daopos, daorad)]
+        # DAOfinder will be needed only in extreme cases of crowded fields
+        if runDAOfinder:
+            daocat = self.run_DAOfinder(fdata)
+            daopos = np.transpose((daocat['xcentroid'], daocat['ycentroid']))
+            daorad = 4 * (abs(daocat['sharpness']) + abs(daocat['roundness1']) + abs(daocat['roundness2']))
+            daoregions = [CirclePixelRegion(center=PixCoord(x, y), radius=z)
+                          for (x, y), z in zip(daopos, daorad)]
 
         #plt.figure(figsize=(10, 10))
         plt.rcParams['figure.figsize'] = (12.0, 10.0)
         plt.ion()
 
+        # draw subplot 1
         ax1 = plt.subplot(221, projection=wcs)
         # make colour image
         rgb = self.make_Lupton_colorstamp(galaxy=galaxy, tile=tile, size=size)
+        # draw coloured image
         ax1.imshow(rgb, origin='lower')
-        circregion = CirclePixelRegion(center=PixCoord(centralPixCoords[0], centralPixCoords[1]),
-                                       radius=angsize)
+        # draw large circle around the galaxy
         circregion.plot(color='y', lw=1.5)
-        # for dregion in daoregions:
-        #     dregion.plot(ax=ax1, color='m')
+        # draw small circles around sources selected from SExtractor catalogue
         for sregion in sewregions:
             sregion.plot(ax=ax1, color='g')
+        # DAOfinder will be needed only in extreme cases of crowded fields
+        if runDAOfinder:
+            for dregion in daoregions:
+                dregion.plot(ax=ax1, color='m')
         ax1.set_title('RGB')
         ax1.set_xlabel('RA')
         ax1.set_ylabel('Dec')
 
+        # draw subplot 2
         ax2 = plt.subplot(222, projection=wcs)
+        # draw gray scaled image
+        ax2.imshow(fdata, cmap='Greys_r', origin='lower', vmin=-0.1, vmax=3.5)
+        # draw large circle around the galaxy
         circregion.plot(color='y', lw=1.5)
+        # draw small circles around sources selected from SExtractor catalogue
         for n, sregion in enumerate(sewregions):
             sregion.plot(ax=ax2, color='g')
             ax2.annotate(repr(n), (sregion.center.x, sregion.center.y), color='green')
-        ax2.imshow(fdata, cmap='Greys_r', origin='lower', vmin=-0.1, vmax=3.5)
-        #daoregions.plot(color='y', lw=1.5, alpha=0.5)
-        # for dregion in daoregions:
-        #     dregion.plot(ax=ax2, color='m')
+        # DAOfinder will be needed only in extreme cases of crowded fields
+        if runDAOfinder:
+            for dregion in daoregions:
+                dregion.plot(ax=ax2, color='m')
         ax2.set_title('Detection')
         ax2.set_xlabel('RA')
         ax2.set_ylabel('Dec')
 
+        # draw subplot 3
         ax3 = plt.subplot(223, projection=wcs)
-        maskeddata = fdata.copy()
-        ix, iy = np.meshgrid(np.arange(maskeddata.shape[0]), np.arange(maskeddata.shape[1]))
-        distance = np.sqrt((ix - centralPixCoords[0])**2 + (iy - centralPixCoords[1])**2)
-        maskeddata[distance > angsize] = 0
+        # draw gray scaled masked image
+        ax3.imshow(maskeddata, cmap='Greys_r', origin='lower', vmin=-0.1, vmax=3.5)
+        # draw large circle around the galaxy
         circregion.plot(color='y', lw=1.5)
+        # draw small circles around sources selected from SExtractor catalogue
+        # mask sources using the size of the FWHM obtained by SExtractor
         for n, sregion in enumerate(sewregions):
             sregion.plot(ax=ax3, color='g')
             if n not in maskstars:
                 mask = sregion.to_mask()
-                maskeddata[mask.bbox.slices] *= 1 - mask.data
-        ax3.imshow(maskeddata, cmap='Greys_r', origin='lower', vmin=-0.1, vmax=3.5)
-        #daoregions.plot(color='y', lw=1.5, alpha=0.5)
-        # for dregion in daoregions:
-        #     dregion.plot(ax=ax2, color='m')
+                if (min(mask.bbox.extent) < 0) or (max(mask.bbox.extent) > size):
+                    print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                          'Region is out of range for extent', mask.bbox.extent)
+                else:
+                    _slices = (slice(mask.bbox.iymin, mask.bbox.iymax), slice(mask.bbox.ixmin, mask.bbox.ixmax))
+                    print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                          mask.bbox.extent, 'min:', min(mask.bbox.extent), _slices)
+                    maskeddata[_slices] *= 1 - mask.data
+        # DAOfinder will be needed only in extreme cases of crowded fields
+        if runDAOfinder:
+            for dregion in daoregions:
+                dregion.plot(ax=ax2, color='m')
         ax3.set_title('Masked')
         ax3.set_xlabel('RA')
         ax3.set_ylabel('Dec')
 
         ax4 = plt.subplot(224, projection=wcs)
+        # create the mask
         fitsmask = f.copy()
         fitsmask[1].data = np.zeros(maskeddata.shape)
         fitsmask[1].data[maskeddata > 0] = 1
+        # draw gray scaled mask
         ax4.imshow(fitsmask[1].data, cmap='Greys_r', origin='lower')
         ax4.set_title('Mask')
         ax4.set_xlabel('RA')
         ax4.set_ylabel('Dec')
 
         plt.subplots_adjust(wspace=.05, hspace=.2)
-        #plt.tight_layout()
 
+        # prepare mask to save and added to the cube
         fitsmask[1].header['IMGTYPE'] = ("MASK", "boolean mask")
         del fitsmask[1].header['EXPTIME']
         del fitsmask[1].header['FILTER']
@@ -582,13 +661,13 @@ class SCubes(object):
         if savemask:
             path2mask: str = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.fits".format(
                 galaxy, tile, size, 'mask'))
-            print('saving mask', path2mask)
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', 'Saving mask to', path2mask)
             fitsmask.writeto(path2mask, overwrite=True)
 
         if savefig:
             path2fig: str = os.path.join(galdir, "{0}_{1}_{2}x{2}_{3}.png".format(
                 galaxy, tile, size, 'maskMosaic'))
-            print('saving fig', path2fig)
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', 'Saving fig to', path2fig)
             plt.savefig(path2fig, format='png', dpi=180)
 
         return fitsmask
@@ -602,22 +681,31 @@ class SCubes(object):
         galdir = os.path.join(self.work_dir, galaxy) if galdir is None else galdir
         tile = self.tiles[0]
         size = self.sizes[0]
+
         if not os.path.isdir(galdir):
             os.mkdir(galdir)
         filenames = glob.glob(galdir + '/{0}_{1}_*_{2}x{2}_swp*.fits'.format(galaxy, tile, size))
         while len(filenames) < 24:
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                  'Calling make_stamps_splus()...')
             self.make_stamps_splus(redo=True)
             filenames = glob.glob(galdir + '/{0}_{1}_*_{2}x{2}_swp*.fits'.format(galaxy, tile, size))
             if len(filenames) < 24:
                 raise IOError('Tile file missing for stamps')
 
         if redo:
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                  'Calling make_stamps_splus()...')
             self.make_stamps_splus(redo=True)
             filenames = glob.glob(galdir + '/*_swp*.fits')
         if dodet:
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                  'Calling make_det_stamp()...')
             self.make_det_stamp()
         elif get_mask and not dodet:
-            print('For mask detection image is required. Overwriting dodet=True')
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                  'For mask detection image is required. Overwriting dodet=True')
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', 'Calling make_det_stamp()...')
             self.make_det_stamp()
 
         fields = set([_.split("_")[-4] for _ in filenames]) if self.tiles is None else self.tiles
@@ -628,11 +716,12 @@ class SCubes(object):
         fnu_unit = u.erg / u.s / u.cm / u.cm / u.Hz
         imtype = {"swp": "DATA", "swpweight": "WEIGHTS"}
         hfields = ["GAIN", "PSFFWHM", "DATE-OBS"]
+        print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', 'Starting cube assembly...')
         for tile, size in itertools.product(fields, sizes):
             cubename = os.path.join(galdir, "{0}_{1}_{2}x{2}_cube.fits".format(galaxy, tile,
                                                                                size))
             if os.path.exists(cubename) and not redo:
-                print('cube exists!')
+                print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', 'Cube exists!')
                 continue
             # Loading and checking images
             imgs = [os.path.join(galdir, "{0}_{1}_{2}_{3}x{3}_swp.fits".format(
@@ -640,6 +729,10 @@ class SCubes(object):
             # Checking if images have calibration available
             headers = [fits.getheader(img, ext=1) for img in imgs]
             if not all(["MAGZP" in h for h in headers]):
+                print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                      'Starting stamps calibration...')
+                print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                      'Calling calibrate_stamps()...')
                 self.calibrate_stamps()
             headers = [fits.getheader(img, ext=1) for img in imgs]
             # Checking if weight images are available
@@ -715,6 +808,8 @@ class SCubes(object):
                 if os.path.isfile(path2mask):
                     imagemask = fits.open(path2mask)
                 else:
+                    print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                          'Calling calc_masks()...')
                     self.calc_masks(galaxy=galaxy, tile=tile, size=size,
                                     savemask=False, savefig=False)
 
@@ -725,7 +820,10 @@ class SCubes(object):
                         if q1 == 'y':
                             newindx = input('type (space separated) the stars numbers do you WANT TO KEEP: ')
                             maskstars += [int(i) for i in newindx.split()]
-                            print('current stars numbers are', maskstars)
+                            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                                  'Current stars numbers are', maskstars)
+                            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ',
+                                  'Calling calc_masks()...')
                             self.calc_masks(galaxy=galaxy, tile=tile, size=size,
                                             savemask=False, savefig=False,
                                             maskstars=maskstars)
@@ -754,22 +852,19 @@ class SCubes(object):
             hdus.append(thdu)
             thdu.header["EXTNAME"] = "METADATA"
             hdulist = fits.HDUList(hdus)
-            print('writing cube', cubename)
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', 'Writing cube to', cubename)
             hdulist.writeto(cubename, overwrite=True)
+            print('[%s]' % datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S'), ' - ', 'Cube successfully finished!')
 
 if __name__ == "__main__":
     # print(initext)
 
     scubes = SCubes()
 
-    # tile = scubes.check_infoot(save_output=True)
-    # out = scubes.make_stamps_splus(redo=True, savestamps=False)
-    # out = scubes.get_zps()
-    # out = scubes.get_zp_correction()
-    # out = scubes.calibrate_stamps()
-    scubes.work_dir = '/home/herpich/Documents/pos-doc/t80s/scubes/'
-    scubes.data_dir = '/home/herpich/Documents/pos-doc/t80s/scubes/data/'
-    scubes.zpcorr_dir = '/home/herpich/Documents/pos-doc/t80s/scubes/data/zpcorr_idr3/'
+    scubes.work_dir = '/ssd/splus/S-cubes/'
+    scubes.data_dir = '/home/herpich/Documents/pos-doc/t80s/Dropbox/splus-cubes/data/'
+    scubes.zpcorr_dir = '/home/herpich/Documents/pos-doc/t80s/Dropbox/splus-cubes/data/zpcorr_idr3/'
+    scubes.tiles_dir = os.path.join(scubes.work_dir, 'coadded')
 
     # # NGC1374
     # scubes.galaxies = np.array(['NGC1374'])
@@ -788,12 +883,12 @@ if __name__ == "__main__":
     # specz = 0.004755
 
     # NGC1087
-    scubes.galaxies = np.array(['NGC1087'])
-    scubes.coords = [['02:46:25.15', '-00:29:55.45']]
-    scubes.tiles = ['STRIPE82-0059']
-    scubes.sizes = np.array([600])
-    scubes.angsize = 210
-    specz = 0.005070
+    # scubes.galaxies = np.array(['NGC1087'])
+    # scubes.coords = [['02:46:25.15', '-00:29:55.45']]
+    # scubes.tiles = ['STRIPE82-0059']
+    # scubes.sizes = np.array([600])
+    # scubes.angsize = 210
+    # specz = 0.005070
 
     # # NGC1365
     # scubes.galaxies = np.array(['NGC1365'])
@@ -802,3 +897,11 @@ if __name__ == "__main__":
     # scubes.sizes = np.array([1500])
     # scubes.angsize = 660
     # specz = 0.005476
+
+    # NGC1326
+    scubes.galaxies = np.array(['NGC1326'])
+    scubes.coords = [['03:23:56.3657298384', '-36:27:52.322333040']]
+    scubes.tiles = ['SPLUS-s28s32']
+    scubes.sizes = np.array([800])
+    scubes.angsize = 100
+    specz = 0.004584
